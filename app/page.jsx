@@ -412,7 +412,7 @@ export default function OurSpace() {
             
             <div className="mt-8 flex items-center gap-2 text-xs text-slate-400">
               <AlertTriangle className="w-3 h-3" />
-              <span>Zero-Knowledge Architecture</span>
+              <span>Wohooooooooooooo</span>
             </div>
           </motion.div>
         )}
