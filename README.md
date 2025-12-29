@@ -104,4 +104,4 @@ This project is for educational purposes. While it uses standard cryptographic a
 
 ---
 
-Made by Satsh
+Made by Satish
