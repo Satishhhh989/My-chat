@@ -26,13 +26,13 @@ import {
   Loader2, 
   LogOut,
   EyeOff,
-  AlertTriangle
+  AlertTriangle,
+  RefreshCw,
+  Hash
 } from 'lucide-react';
 import { format } from 'date-fns';
 
 // --- FIREBASE CONFIGURATION ---
-// In a real production app, it is best practice to move these to a .env.local file
-// e.g. apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY
 const firebaseConfig = {
   apiKey: "AIzaSyBRL2GkvUVRSoCG7CxHyYnAX3AaVVe9eUI",
   authDomain: "chat-bde6a.firebaseapp.com",
@@ -45,13 +45,10 @@ const firebaseConfig = {
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApp();
 const db = getFirestore(app);
 const auth = getAuth(app);
-
-// Unique namespace for this deployment to prevent data collisions
-const APP_ID = 'ourspace-v1'; 
+const APP_ID = 'ourspace-v2-secure'; // Updated version namespace
 
 // --- NATIVE UTILITIES ---
 
-// 1. Native Image Compression
 const compressImageNative = (file) => {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -81,7 +78,6 @@ const compressImageNative = (file) => {
   });
 };
 
-// 2. AES-GCM Encryption
 const getCryptoKey = async (password) => {
   const enc = new TextEncoder();
   const keyMaterial = await window.crypto.subtle.importKey(
@@ -90,7 +86,7 @@ const getCryptoKey = async (password) => {
   return window.crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
-      salt: enc.encode("ourspace-salt-v1"), 
+      salt: enc.encode("ourspace-salt-v2"), 
       iterations: 100000,
       hash: "SHA-256",
     },
@@ -131,9 +127,9 @@ const decryptData = async (encryptedBase64, password) => {
   } catch (e) { return null; }
 };
 
-const hashRoomId = async (key) => {
+const hashRoomId = async (roomName) => {
   const enc = new TextEncoder();
-  const data = enc.encode(key);
+  const data = enc.encode(roomName);
   const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
   const hashArray = Array.from(new Uint8Array(hashBuffer));
   return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
@@ -143,7 +139,7 @@ const hashRoomId = async (key) => {
 
 const MessageBubble = ({ msg, secretKey, name }) => {
   const [content, setContent] = useState('');
-  const [decrypted, setDecrypted] = useState(false);
+  const [status, setStatus] = useState('decrypting'); // decrypting, success, fail
   const isMe = msg.sender === name;
 
   useEffect(() => {
@@ -151,31 +147,41 @@ const MessageBubble = ({ msg, secretKey, name }) => {
     const process = async () => {
       const result = await decryptData(msg.encryptedContent, secretKey);
       if (mounted) {
-        setContent(result || '🔒 Encrypted Data');
-        setDecrypted(true);
+        if (result) {
+          setContent(result);
+          setStatus('success');
+        } else {
+          setContent('🔒 Encrypted Message (Wrong Key)');
+          setStatus('fail');
+        }
       }
     };
     process();
     return () => { mounted = false; };
   }, [msg.encryptedContent, secretKey]);
 
-  if (!decrypted) return <div className="p-3 bg-slate-100 rounded-lg animate-pulse w-24 h-8" />;
+  if (status === 'decrypting') return <div className="p-3 bg-slate-100 rounded-lg animate-pulse w-24 h-8" />;
 
   return (
     <motion.div 
       initial={{ opacity: 0, y: 5 }}
       animate={{ opacity: 1, y: 0 }}
-      className={`max-w-[85%] p-3 rounded-2xl text-sm shadow-sm relative select-none
+      className={`max-w-[85%] p-3 rounded-2xl text-sm shadow-sm relative select-none group
         ${isMe 
           ? 'bg-slate-800 text-white rounded-tr-none' 
-          : 'bg-white text-slate-800 border border-slate-200 rounded-tl-none'}
+          : status === 'fail' 
+            ? 'bg-red-50 text-red-500 border border-red-100'
+            : 'bg-white text-slate-800 border border-slate-200 rounded-tl-none'}
       `}
       onContextMenu={(e) => e.preventDefault()}
     >
-      {msg.type === 'image' ? (
+      {msg.type === 'image' && status === 'success' ? (
         <img src={content} alt="Content" className="rounded-lg max-w-full pointer-events-none" />
       ) : (
-        <p className="whitespace-pre-wrap leading-relaxed">{content}</p>
+        <p className="whitespace-pre-wrap leading-relaxed flex items-center gap-2">
+          {status === 'fail' && <Lock className="w-3 h-3" />}
+          {content}
+        </p>
       )}
     </motion.div>
   );
@@ -189,7 +195,8 @@ export default function OurSpace() {
   
   // Login State
   const [name, setName] = useState('');
-  const [secretKey, setSecretKey] = useState('');
+  const [roomCode, setRoomCode] = useState(''); // Public Room Name
+  const [secretKey, setSecretKey] = useState(''); // Private Encryption Key
   const [roomId, setRoomId] = useState('');
   
   // Chat State
@@ -201,10 +208,8 @@ export default function OurSpace() {
   
   const scrollRef = useRef(null);
 
-  // 1. Auth & Visibility Listener
   useEffect(() => {
-    // Basic anonymous auth
-    signInAnonymously(auth).catch(err => console.error("Auth error:", err));
+    signInAnonymously(auth).catch(console.error);
     const unsubAuth = onAuthStateChanged(auth, setUser);
 
     const handleVisibility = () => {
@@ -224,11 +229,10 @@ export default function OurSpace() {
     };
   }, []);
 
-  // 2. Presence & Messages Listener
   useEffect(() => {
     if (view !== 'chat' || !roomId || !name) return;
 
-    // A. Heartbeat (I am here) - Uses parallel collection: {roomId}_presence
+    // Presence (Uses Room ID)
     const presenceCollectionId = `${roomId}_presence`;
     const presenceRef = doc(db, 'artifacts', APP_ID, 'public', 'data', presenceCollectionId, name);
     
@@ -240,10 +244,8 @@ export default function OurSpace() {
       });
     }, 5000); 
 
-    // Set initial presence
     setDoc(presenceRef, { name, lastSeen: serverTimestamp(), status: 'online' });
 
-    // B. Listen for Partners
     const presenceColl = collection(db, 'artifacts', APP_ID, 'public', 'data', presenceCollectionId);
     const unsubPresence = onSnapshot(presenceColl, (snapshot) => {
       const partners = [];
@@ -251,7 +253,6 @@ export default function OurSpace() {
       snapshot.forEach(doc => {
         const data = doc.data();
         const lastSeenTime = data.lastSeen?.toMillis?.() || 0;
-        // 15 second timeout for "online"
         if (data.name !== name && (now - lastSeenTime < 15000)) {
             partners.push(data.name);
         }
@@ -259,7 +260,7 @@ export default function OurSpace() {
       setActivePartners(partners);
     });
 
-    // C. Listen for Messages - Uses collection: {roomId}
+    // Messages (Uses Room ID)
     const messagesRef = collection(db, 'artifacts', APP_ID, 'public', 'data', roomId);
     
     const unsubMessages = onSnapshot(query(messagesRef), (snapshot) => {
@@ -283,18 +284,24 @@ export default function OurSpace() {
     };
   }, [view, roomId, name]);
 
+  const generateRandomRoom = () => {
+    const random = Array.from(window.crypto.getRandomValues(new Uint8Array(8)))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+    setRoomCode(`room-${random}`);
+  };
+
   const handleLogin = async (e) => {
     e.preventDefault();
-    if (!name.trim() || !secretKey.trim()) return;
-    const id = await hashRoomId(secretKey);
+    if (!name.trim() || !roomCode.trim() || !secretKey.trim()) return;
+    
+    // Hash the Room Code to find the collection (Location)
+    const id = await hashRoomId(roomCode);
     setRoomId(id);
     setView('chat');
   };
 
   const handleLogout = () => {
-    if (confirm("End secure session?")) {
-      window.location.reload();
-    }
+    if (confirm("End secure session?")) window.location.reload();
   };
 
   const handleSendMessage = async (e) => {
@@ -318,6 +325,7 @@ export default function OurSpace() {
 
   const sendMessage = async (content, type) => {
     try {
+      // Encrypt using the Secret Key (Lock), NOT the Room Code
       const encrypted = await encryptData(content, secretKey);
       const messagesRef = collection(db, 'artifacts', APP_ID, 'public', 'data', roomId);
       await addDoc(messagesRef, {
@@ -336,7 +344,6 @@ export default function OurSpace() {
     >
       <AnimatePresence mode="wait">
         
-        {/* PRIVACY BLUR OVERLAY */}
         {isBlurred && view === 'chat' && (
           <div className="fixed inset-0 z-50 bg-slate-900/90 backdrop-blur-xl flex flex-col items-center justify-center text-white p-6 text-center">
             <EyeOff className="w-16 h-16 mb-4 text-slate-400" />
@@ -351,7 +358,6 @@ export default function OurSpace() {
           </div>
         )}
 
-        {/* LOGIN SCREEN */}
         {view === 'login' && (
           <motion.div 
             key="login"
@@ -363,19 +369,20 @@ export default function OurSpace() {
             <div className="absolute top-0 left-0 w-full h-2 bg-gradient-to-r from-slate-800 to-slate-600" />
             
             <div className="w-full max-w-sm bg-white rounded-2xl shadow-2xl p-8 border border-slate-100">
-              <div className="flex items-center gap-3 mb-8">
+              <div className="flex items-center gap-3 mb-6">
                 <div className="p-3 bg-slate-900 rounded-xl">
                   <Shield className="w-6 h-6 text-white" />
                 </div>
                 <div>
                   <h1 className="text-xl font-bold text-slate-900 tracking-tight">OurSpace</h1>
-                  <p className="text-xs text-slate-500 font-medium">End-to-End Encrypted</p>
+                  <p className="text-xs text-slate-500 font-medium">Zero-Knowledge Architecture</p>
                 </div>
               </div>
 
-              <form onSubmit={handleLogin} className="space-y-5">
+              <form onSubmit={handleLogin} className="space-y-4">
+                {/* 1. Identity */}
                 <div>
-                  <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Identity</label>
+                  <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">1. Your Name</label>
                   <input 
                     type="text" 
                     value={name}
@@ -386,38 +393,57 @@ export default function OurSpace() {
                   />
                 </div>
                 
+                {/* 2. Room Code (Address) */}
                 <div>
-                  <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Access Key</label>
+                  <label className="flex items-center justify-between text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">
+                    <span>2. Room Code (Public Location)</span>
+                    <button type="button" onClick={generateRandomRoom} className="text-blue-500 hover:text-blue-600 flex items-center gap-1 text-[10px] normal-case">
+                      <RefreshCw className="w-3 h-3" /> Generate Random
+                    </button>
+                  </label>
+                  <div className="relative">
+                    <input 
+                      type="text" 
+                      value={roomCode}
+                      onChange={(e) => setRoomCode(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-3 pl-10 outline-none focus:ring-2 focus:ring-slate-900 transition-all font-mono text-sm"
+                      placeholder="e.g. room-8f92a1"
+                      required
+                    />
+                    <Hash className="absolute left-3 top-3.5 w-4 h-4 text-slate-400" />
+                  </div>
+                </div>
+
+                {/* 3. Secret Key (Lock) */}
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">3. Secret Key (Private Lock)</label>
                   <div className="relative">
                     <input 
                       type="password" 
                       value={secretKey}
                       onChange={(e) => setSecretKey(e.target.value)}
                       className="w-full bg-slate-50 border border-slate-200 rounded-lg px-4 py-3 pl-10 outline-none focus:ring-2 focus:ring-slate-900 transition-all font-medium"
-                      placeholder="Enter shared passphrase"
+                      placeholder="Only you two know this"
                       required
                     />
                     <Lock className="absolute left-3 top-3.5 w-4 h-4 text-slate-400" />
                   </div>
+                  <p className="text-[10px] text-slate-400 mt-2 leading-tight">
+                    <span className="font-bold text-slate-600">Tip:</span> If you lose the Secret Key, data is lost forever. Room Code helps you find the chat; Secret Key decrypts it.
+                  </p>
                 </div>
 
                 <button 
                   type="submit"
-                  className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-lg py-3.5 shadow-lg transition-transform active:scale-95 flex items-center justify-center gap-2"
+                  className="w-full bg-slate-900 hover:bg-slate-800 text-white font-bold rounded-lg py-3.5 mt-2 shadow-lg transition-transform active:scale-95 flex items-center justify-center gap-2"
                 >
-                  Initialize Secure Link
+                  Enter Secure Channel
                 </button>
               </form>
-            </div>
-            
-            <div className="mt-8 flex items-center gap-2 text-xs text-slate-400">
-              <AlertTriangle className="w-3 h-3" />
-              <span>Wohooooooooooooo</span>
             </div>
           </motion.div>
         )}
 
-        {/* CHAT SCREEN */}
         {view === 'chat' && (
           <motion.div 
             key="chat"
@@ -425,11 +451,10 @@ export default function OurSpace() {
             animate={{ opacity: 1 }}
             className="flex flex-col h-[100dvh] max-w-lg mx-auto bg-white shadow-2xl relative"
           >
-            {/* Professional Header */}
             <header className="flex items-center justify-between px-5 py-4 bg-white border-b border-slate-100 z-10 shadow-sm">
               <div>
                 <h2 className="font-bold text-slate-900 text-lg leading-tight flex items-center gap-2">
-                  OurSpace <span className="px-1.5 py-0.5 bg-slate-100 text-[10px] rounded text-slate-500 font-mono">SECURE</span>
+                  OurSpace <span className="px-1.5 py-0.5 bg-slate-100 text-[10px] rounded text-slate-500 font-mono">V2</span>
                 </h2>
                 <div className="flex items-center gap-2 mt-1">
                   <div className={`w-2 h-2 rounded-full ${activePartners.length > 0 ? 'bg-emerald-500 animate-pulse' : 'bg-slate-300'}`}></div>
@@ -448,12 +473,12 @@ export default function OurSpace() {
               </button>
             </header>
 
-            {/* Messages */}
             <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
               {messages.length === 0 && (
                 <div className="flex flex-col items-center justify-center h-full text-slate-300 space-y-3">
                   <Shield className="w-12 h-12 opacity-20" />
-                  <p className="text-sm font-medium">End-to-End Encrypted Channel</p>
+                  <p className="text-sm font-medium">Room: {roomCode}</p>
+                  <p className="text-xs text-slate-400">Waiting for encrypted messages...</p>
                 </div>
               )}
               
@@ -469,7 +494,6 @@ export default function OurSpace() {
               <div ref={scrollRef} />
             </div>
 
-            {/* Input */}
             <div className="p-4 bg-white border-t border-slate-100">
               <form 
                 onSubmit={handleSendMessage}
